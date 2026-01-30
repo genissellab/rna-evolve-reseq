@@ -1,13 +1,11 @@
-# All analyses were performed @genobioinfo.toulouse.inrae.fr.
+# All analyses were performed using the slurm cluster https://bioinfo.genotoul.fr
 
-1- Use trimmomatic
-2-
-3-
-4-
-################## INPUT FILES
+############## INPUT FILES
 
-samples.txt
+INPUT/samples.txt
 # samples.txt contain the list of all prefix for all samples
+
+All raw .fastq files are available in the NCBI BioProject : PRJNA1414243 & .bam files are available upon request to authors
 
 ################## REFERENCES
 
