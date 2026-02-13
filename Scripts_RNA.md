@@ -1,0 +1,339 @@
+
+
+# All analyses were performed @genobioinfo.toulouse.inrae.fr.
+# Steps
+
+1/ Input/Output file specifications
+2/ Workflow
+
+	2.1- Hisat2 Index of Reference Genome
+	2.2- Scans reads for quality threshold_creates 4 fastq per sample
+	2.3- Hisat read mapping_creates bam files
+	2.4- Stringtie tanscript assembly and abundance estimation		
+	2.5- Import raw counts and Remove outliers ribosomal genes
+
+
+########################################################################
+##################  1/ INPUT/OUTPUT FILE SPECIFICATIONS  ###############
+########################################################################
+
+		### INPUT FILES ###
+samples.txt
+# samples.txt contains the list of all prefix for all samples
+
+z.tritici.IP0323.reannot.gtf
+# z.tritici.IP0323.reannot.gtf contains all cds from the latest annotations of the species, published by Lapalu et al., 2025
+
+# fasta file from Z. tritici last transcript annotation (Lapalu et al., 2025)
+z.tritici.IP0323.reannot.mrna.fasta
+
+# Ribosome genes to be removed prior to normalization
+
+# Raw fastq files
+
+		### OUTPUT FILES ###
+
+# for mapping against one reference genome
+
+IP0323_exons.tsv
+IP0323_splicesites.tsv
+
+index.primary_assembly.1.ht2
+index.primary_assembly.2.ht2
+index.primary_assembly.3.ht2
+index.primary_assembly.4.ht2
+index.primary_assembly.5.ht2
+index.primary_assembly.6.ht2
+index.primary_assembly.7.ht2
+index.primary_assembly.8.ht2
+
+# for each RNA seq sample:
+
+trimmed paired and unpaired _R1 _R2 fastq files
+
+{NAME}.out.gtf  e2t.ctab  e_data.ctab  i2t.ctab  i_data.ctab  t_data.ctab
+
+# final output is raw count matrix
+gene_count_matrix.csv
+
+
+
+		### REFERENCES ###
+
+Lapalu et al., 2025 Improved Gene Annotation of the Fungal Wheat Pathogen Zymoseptoria tritici Based on Combined Iso-Seq and RNA-Seq Evidence 2025. MPMI 38, 8034-847.
+Pertea, M., Kim, D., Pertea, G. et al. Transcript-level expression analysis of RNA-seq experiments with HISAT, StringTie and Ballgown. Nat Protoc 11, 1650–1667 (2016). https://doi.org/10.1038/nprot.2016.095.
+
+
+######################################################
+##################    2/  WORKFLOW     ###############
+######################################################
+# Most steps of the workflow are following best practice from Pertea et al., 2016
+
+		### 2.1- Hisat2 Index of Reference Genome
+
+#!/bin/bash
+module load ../devel/python/Python-3.11.1
+module load ../HISAT2/2.2.1
+
+extract_splice_sites.py z.tritici.IP0323.reannot.gtf > IP0323_splicesites.tsv
+extract_exons.py z.tritici.IP0323.reannot.gtf >IP0323_exons.tsv
+
+# creates 2 files
+#IP0323_splicesites.tsv
+#IP0323_exons.tsv
+
+
+hisat2-build -p 8 --ss IP0323_splicesites.tsv --exon IP0323_exons.tsv Mycosphaerella_graminicola.allmasked.fa index.primary_assembly
+
+# creates 8 files
+#index.primary_assembly.1.ht2
+#index.primary_assembly.2.ht2
+#index.primary_assembly.3.ht2
+#index.primary_assembly.4.ht2
+#index.primary_assembly.5.ht2
+#index.primary_assembly.6.ht2
+#index.primary_assembly.7.ht2
+#index.primary_assembly.8.ht2
+
+
+
+		### 2.2- Scans reads for quality threshold_creates 4 fastq per sample
+
+# Side note: Raw fastqfiles for each samples are FasQC treated before and after Trimmomatic
+
+#!/bin/sh
+#
+#  
+# Load Trimmomatic module
+module load .../Trimmomatic/0.39
+
+# Define TRIM_HOME if not already set
+TRIM_HOME="/path/to/Trimmomatic/0.39"  # Replace with actual path
+
+
+list=$(cat samples.txt)
+for prefix in $list; do
+    java -jar $TRIM_HOME/trimmomatic.jar PE -phred33 \
+        ${prefix}_R1_001.fastq.gz ${prefix}_R2_001.fastq.gz \
+        ${prefix}_R1_paired.fq ${prefix}_R1_unpaired.fq \
+        ${prefix}_R2_paired.fq ${prefix}_R2_unpaired.fq \
+        SLIDINGWINDOW:4:20 MINLEN:30
+done
+
+#output files .._R1_paired.fq, .._R2_paired.fq, .._R1_unpaired.fq, .._R2_unpaired.fq
+
+
+		### 2.3- Hisat mapping and creates bam files
+
+#!/bin/bash
+#
+# Align reads with HISAT2, convert to BAM, sort, and index
+
+module load .../devel/python/Python-3.11.1
+module load .../HISAT2/2.2.1
+
+while read -r prefix; do
+   
+# Run HISAT2 and convert to BAM
+   hisat2 -p 16 -x Mycogenome -1 "${prefix}_R1_paired.fq" -2 "${prefix}_R2_paired.fq" 2> "${prefix}.hisat2.log" | \
+        samtools view -b - | \
+        samtools sort -@ 16 -o "${prefix}_sort.bam" -
+    samtools index "${prefix}_sort.bam"
+
+# Check if BAM file was created
+    if [ ! -f "${prefix}_sort.bam" ]; then
+        echo "Error: Failed to create BAM for ${prefix}" >&2
+    fi
+
+done < samples.txt
+
+
+# creates 1 sorted and indexed bam file per sample
+
+
+		### 2.4- Stringtie tanscript assembly
+
+			### 2.4.1 Assembly
+#!/bin/bash
+# Run StringTie
+#
+#SBATCH -p workq
+#SBATCH -c 16
+
+# Load StringTie module
+module load ../StringTie/2.2.1
+
+# Define the sample list 
+list=$(cat samples.txt)
+
+for prefix in $list; do
+    # Create a directory 
+    mkdir -p "${prefix}"
+
+    # Run StringTie
+    stringtie "${prefix}_sort.bam" \
+        -G ../z.tritici.IP0323.reannot.gtf \
+        -l "${prefix}" \
+        -o "./${prefix}/${prefix}.out.gtf" \
+        -p 16 \
+        -c 3 \
+        -B
+
+    # Check if output was created
+    if [ ! -f "./${prefix}/${prefix}.out.gtf" ]; then
+        echo "Error: StringTie failed for ${prefix}" >&2
+    fi
+done
+
+
+# creates output files for each sample: ${prefix}.out.gtf, e_data.ctab, i_data.ctab, e2t.ctab, i2t.ctab
+    
+			### 2.4.2 - Create mergelist.txt
+
+#!/bin/bash
+# merge
+# file: list.sh
+
+# Define the list of folder names
+list=$(cat folder_list.txt)
+
+# create mergelist.txt
+> mergelist.txt
+
+for folder in $list; do
+    # Find and append the full path of *.out.gtf files to mergelist.txt
+    find "$folder" -type f -name "*.out.gtf" -exec realpath {} \; >> mergelist.txt
+done
+
+
+			### 2.4.3 - Merge transcripts
+
+#!/bin/bash
+# 
+
+# Load the StringTie module
+module load ../StringTie/2.2.1
+
+# Navigate to the directory containing mergelist.txt 
+cd ../.. || { echo "Failed to change directory"; exit 1; }
+
+# Run StringTie merge
+stringtie --merge \
+    -p 8 \
+    -G z.tritici.IP0323.reannot.gtf \
+    -o stringtie_merged.gtf \
+    mergelist.txt
+
+# Check if the output was created
+if [ ! -f "stringtie_merged.gtf" ]; then
+    echo "Error: Failed to create merged GTF file." >&2
+    exit 1
+fi
+
+echo "Merged GTF created: stringtie_merged.gtf"
+
+
+			### 2.4.4 — Quantification against merged gtf
+
+#!/bin/bash
+#SBATCH -p workq
+#SBATCH -c 16
+
+module load ../StringTie/2.2.1
+cd ../.. || exit 1
+
+list="..."
+
+for name in $list; do
+    mkdir -p counts
+
+    stringtie "../.../${name}_sort.bam" \
+        -e -B \
+        -G ./stringtie_merged.gtf \
+        -l "${name}" \
+        -o "/../../${name}.gtf"
+done
+
+# this step will create per sample: e2t.ctab, e_data.ctab, i2t.ctab, i_data.ctab
+
+
+
+		### 2.5- Import raw counts and remove outliers ribosomal genes
+
+			
+#!/usr/bin/env Rscript
+#'
+#' 
+#' *Date*: 2026-02-08
+#' *Version*: 1.0
+#'
+#' 
+#' *Dependencies*
+#'   - tidyverse (for data manipulation)
+#'   - genefilter (for subset.pattern())
+#'   - stringr (for string operations)
+#'
+#'
+#'
+
+library(tidyverse)
+library(genefilter)
+library(stringr)
+
+
+
+
+
+			### 2.5.1: Import counts using tximport
+# `quant_files` is the list of StringTie quantification files ("t_data.ctab")
+quant_files <- list.files(
+  path = "../COUNT/",
+  pattern = "t_data.ctab$",
+  full.names = TRUE
+)
+
+# Read the first file to extract tx2gene mapping
+tmp <- read_tsv(quant_files[1], col_names = TRUE)
+tx2gene <- tmp[, c("t_name", "gene_name")]
+
+# Import counts with tximport
+txi <- tximport(
+  files = quant_files,
+  type = "stringtie",
+  tx2gene = tx2gene,
+  readLength = 75  
+)
+
+			### 2.5.2: Remove ribosome-related genes
+
+
+# List of ribosome genes from the annotation file
+ribosomes <- str_split(
+  subset.pattern(
+    read.csv(file = "../Annotation_r.csv", sep = "\t"),
+    "ribosom",
+    4
+  )[, 3],
+  as.character("\\."),
+  n = 2,
+  simplify = TRUE
+)[, 1]
+writeLines(ribosomes, "Results/ribosome_genes.txt")
+
+
+# Subset the counts matrix to exclude ribosome genes
+non_ribosome_genes <- rownames(txi$counts)[!rownames(txi$counts) %in% ribosomes]
+
+# Create a filtered tximport object
+txi_filtered <- txi
+txi_filtered$counts <- txi$counts[non_ribosome_genes, ]
+
+# save final read counts
+write.csv(
+  txi_filtered$counts,
+  file = "transcript_count_matrix.csv",
+  quote = FALSE,
+  row.names = TRUE  
+)
+
+## end
